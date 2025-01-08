@@ -1,0 +1,117 @@
+CREATE FUNCTION [dbo].[fSQ_InstallOutstanding](
+												@soldStartDate			datetime, 
+                                                @InstallCutoffDate		datetime	
+                                              )
+returns table
+as
+
+-- ===========================================================================
+-- Function:	fSQ_InstallOutstanding
+--
+-- Create Date:	02/09/2012
+--
+-- Description: Gets all jobs that are marked sold, but do not have an Install Appointment Scheduled OR
+--				have a most recent install date that was in the previous month.
+--				All these jobs do not have an install complete date
+--				Count ALL job types.
+--
+--				The purpose of this number is to help figure out what jobs have not had royalty paid, i.e
+--				were never marked install complete for one reason or another.
+--
+-- Call Example: (select count(*) from dbo.fSQ_InstallOutstanding(@dateFrom, @dateTo) where franchise_number = 'IL137')
+-- Call Example: (select sum(sales_net_amt) from dbo.fSQ_InstallOutstanding(@dateFrom, @dateTo) franchise_number = 'IL137')
+-- ===========================================================================
+
+return
+(
+
+			-- Sold date should be greater than the day 1 of previous year (@dJan1_1year)
+			-- Install cutoff date should be day one of current month (@dMonth)
+
+            select      ru_jobs.*,
+						ru_sales.sales_net_amt,
+						ru_sales.sales_total_amt,
+
+						case when install_cmpltd_dt is not null							then install_cmpltd_dt
+							 when apply_first_install.sch_dt is not null			then apply_first_install.sch_dt
+							 when apply_last_install_or_service.sch_dt is not null	then apply_last_install_or_service.sch_dt
+							 when ru_jobs.sold_dt is not null then ru_jobs.sold_dt
+							end  'chart_date', 
+						
+						ru_customers.industry_type_id,
+						ru_customers.industry_type_sub_id
+                        
+            from		tbl_rollup_tbl_jobs ru_jobs  with(nolock)
+			join		view_tbl_rollup_tbl_sales ru_sales with(nolock) on ru_sales.job_id = ru_jobs.job_id and ru_sales.franchise_number = ru_jobs.franchise_number
+			join	tbl_rollup_tbl_customers ru_customers with(nolock) on ru_customers.franchise_number = ru_jobs.franchise_number and ru_customers.customer_id = ru_jobs.customer_id			
+	
+			outer apply dbo.fSQ_ServiceAppt(0, ru_jobs.franchise_number, ru_jobs.job_id, 0) apply_first_install
+			outer apply dbo.fSQ_ServiceAppt(1, ru_jobs.franchise_number, ru_jobs.job_id, -1) apply_last_install_or_service
+
+
+			where		ru_jobs.sold_dt > convert(datetime, convert(varchar, @soldStartDate, 101) + ' 00:00:00', 120)	
+			and			ru_jobs.sold_dt is not null
+			and			ru_jobs.install_cmpltd_dt is null
+			and			ru_jobs.job_id > 1	
+		
+			--and			((select retVal from dbo.fJob_Repeat_Business(@repeat_business, ru_jobs.job_id, ru_jobs.franchise_number)) = 1) -- 02-02-2014 New Function	
+			
+			
+			and					
+					(
+						--	Jobs with a Sold Date, but no scheduled install date 
+						--  Jobs with a Sold Date, and a scheduled first install date that occurs before the current month. 
+						(
+							ru_jobs.job_type_id IN (1,4) -- Jobs and Add-Ons
+							and 
+							(
+								-- no scheduled install date
+								apply_first_install.sch_dt is null
+
+								-- scheduled first install date that occurs before the current month.
+								or
+
+								-- 04-10-2014 Not sure why this was like this but it was changed to the new one below
+								--apply_first_install.sch_dt  <  convert(datetime, '01-01-' + convert(varchar, (datepart(yyyy, @installCutoffDate)-1)) + ' 00:00:00', 120)
+								apply_first_install.sch_dt  < (select dMonth from dbo.fDates_Extended_Metrics(@installCutoffDate))
+							)
+						)	
+			
+			
+						or
+						--  (we want to count invoice onlys, but only the ones sold before the current month since those
+						--	are already getting captured in this months "On the board.") 
+						(
+							ru_jobs.job_type_id = 3	-- Invoice Only
+							and 
+							-- 04-14-2014 Not sure why this was like this but it was changed to the new one below	
+							--j.sold_dt < convert(datetime, convert(varchar, @installCutoffDate, 101) + ' 00:00:00', 120)	 
+							ru_jobs.sold_dt < (select dMonth from dbo.fDates_Extended_Metrics(@installCutoffDate))
+						)
+
+						or 
+						--  Service tickets that only have appointments that occur before the current month.
+						(
+							ru_jobs.job_type_id = 2	-- Service Ticket
+							and
+							-- 04-10-2014 Not sure why this was like this but it was changed to the new one below								
+							--apply_last_install_or_service.sch_dt <	 convert(datetime, '01-01-' + convert(varchar, (datepart(yyyy, @installCutoffDate)-1)) + ' 00:00:00', 120)
+							apply_first_install.sch_dt  < (select dMonth from dbo.fDates_Extended_Metrics(@installCutoffDate))
+						)
+					)		
+
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+GO
